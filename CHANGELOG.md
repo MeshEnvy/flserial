@@ -1,5 +1,5 @@
 ## 0.3.3
-* Relace fifo library
+* Replace fifo library
 
 ## 0.3.2
 * MacOS support
