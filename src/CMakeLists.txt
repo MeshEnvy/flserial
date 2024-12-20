@@ -3,7 +3,7 @@
 # the plugin to fail to compile for some customers of the plugin.
 cmake_minimum_required(VERSION 3.10)
 
-project(flserial_library VERSION 0.3.2 LANGUAGES C CXX)
+project(flserial_library VERSION 0.3.3 LANGUAGES C CXX)
 
 if(MSVC)
     add_definitions(-D_CRT_SECURE_NO_WARNINGS)
@@ -14,7 +14,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(SRC_FILES
   "native_libs/src/serial.cpp"
   "native_libs/src/tinycthread.c"
-  "native_libs/src/fifo.c"
+  "native_libs/src/ringbuffer.c"
   "flserial.cpp"
   "flserial.def"
 )

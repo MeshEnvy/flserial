@@ -1,3 +1,6 @@
+## 0.3.3
+* Relace fifo library
+
 ## 0.3.2
 * MacOS support
 * Memory allocation fix

@@ -1,10 +1,10 @@
 #include "flserial.h"
 #include "native_libs/include/serial/serial.h"
 #include "native_libs/include/tinycthread.h"
-#include "native_libs/include/fifo.h"
+#include "native_libs/include/ringbuffer.h"
 #include <iostream>
 
-#define FL_SERIAL_BUFF_LEN (32 * 1024)
+#define FL_SERIAL_BUFF_LEN (8 * 1024)
 
 typedef struct _flserial_
 {
@@ -15,8 +15,10 @@ typedef struct _flserial_
     char lasterrormsg[512];
     thrd_t cthread;
     int breakThread;
-    fifo_t *cinfifo;
-    fifo_t *coutfifo;
+    ring_buffer_t  cinfifo;
+    ring_buffer_t  coutfifo;
+    char inbuff[FL_SERIAL_BUFF_LEN];
+    char outbuff[FL_SERIAL_BUFF_LEN];
     mtx_t inFifo_mutex;
     mtx_t outFifo_mutex;
     flcallback callback;
@@ -25,34 +27,39 @@ typedef struct _flserial_
 int SerialThread(void *aArg)
 {
     FlSerial *serial = (FlSerial *)aArg;
-    int res = 0;
+    ring_buffer_size_t res = 0;
     uint8_t buff[FL_SERIAL_BUFF_LEN];
-    size_t len = sizeof(buff);
+    ring_buffer_size_t len = sizeof(buff);
+    ring_buffer_size_t total = 0;
+    int isEmpty = 0;
 
     while (!serial->breakThread)
     {
-
         try
         {
-
             res = (int)serial->serialport->read((uint8_t *)buff, (size_t)len);
             if (res > 0)
             {
-                mtx_lock(&serial->outFifo_mutex);
-                fifo_write(serial->cinfifo, (const char *)buff, res);
-                mtx_unlock(&serial->outFifo_mutex);
-                serial->callback(0, res);
-                // thrd_sleep(&duration, &rem);
-                continue;
+                mtx_lock(&serial->inFifo_mutex);
+                ring_buffer_queue_arr(&serial->cinfifo, (const char *)buff, res);
+                mtx_unlock(&serial->inFifo_mutex);
+                total += res;
+                if(!serial->serialport->available()){
+                    serial->callback(0, total);
+                    total = 0;
+                } else {
+                    continue;
+                }
             }
 
-            if (fifo_data_available(serial->coutfifo))
-            {
                 mtx_lock(&serial->outFifo_mutex);
-                res = (size_t)fifo_read(serial->coutfifo, (char *)buff, (int)len);
+                res = (ring_buffer_size_t)ring_buffer_dequeue_arr(&serial->coutfifo, (char *)buff, (int)len);
                 mtx_unlock(&serial->outFifo_mutex);
-                res = (int)serial->serialport->write((uint8_t *)buff, (size_t)res);
-            }
+                if (res > 0) {
+                    res = (int)serial->serialport->write((uint8_t*)buff, (size_t)res);
+                }
+
+           
         }
         catch (const serial::IOException &ioe)
         {
@@ -105,7 +112,7 @@ FFI_PLUGIN_EXPORT int fl_open(int flh, char *portname, int baudrate)
 
     port->serialport = new serial::Serial();
 #if !defined(__linux__) && !defined(__APPLE__)
-    port->serialport->setTimeout(serial::Timeout(FL_SERIAL_BUFF_LEN, 2, 0, 0, 0));
+    port->serialport->setTimeout(serial::Timeout(0, 2, 0, 0, 0));
 #endif // #if defined(__linux__)
     port->serialport->setPort(portname);
     port->serialport->setBaudrate(baudrate);
@@ -113,8 +120,10 @@ FFI_PLUGIN_EXPORT int fl_open(int flh, char *portname, int baudrate)
     try
     {
         port->serialport->open();
-        port->cinfifo = fifo_create(MAX_PORT_FIFO_LEN);
-        port->coutfifo = fifo_create(MAX_PORT_FIFO_LEN);
+
+        ring_buffer_init(&port->cinfifo, port->inbuff, FL_SERIAL_BUFF_LEN );
+        ring_buffer_init(&port->coutfifo, port->outbuff, FL_SERIAL_BUFF_LEN );
+
         port->serialport->setBytesize(serial::bytesize_t::eightbits);
         port->serialport->setParity(serial::parity_t::parity_none);
         port->serialport->setStopbits(serial::stopbits_one);
@@ -164,17 +173,17 @@ FFI_PLUGIN_EXPORT int fl_ports(int index, int buffsize, char *buff)
 FFI_PLUGIN_EXPORT int fl_read(int flh, int len, char *buff)
 {
     FlSerial *port = flserial_tab[flh];
-    int res = 0;
+    ring_buffer_size_t res = 0;
 
     char *buf = NULL;
-    size_t size = 0;
-    int read = 0;
+    ring_buffer_size_t size = 0;
+    ring_buffer_size_t read = 0;
 
     mtx_lock(&port->inFifo_mutex);
-    read = fifo_read(port->cinfifo, buff, len);
+    read = ring_buffer_dequeue_arr(&port->cinfifo, buff, (ring_buffer_size_t) len);
     mtx_unlock(&port->inFifo_mutex);
 
-    return read;
+    return (int)read;
 }
 
 FFI_PLUGIN_EXPORT int fl_write(int flh, int len, char *data)
@@ -184,7 +193,7 @@ FFI_PLUGIN_EXPORT int fl_write(int flh, int len, char *data)
     try
     {
         mtx_lock(&port->outFifo_mutex);
-        res = fifo_write(port->coutfifo, data, len);
+        ring_buffer_queue_arr(&port->coutfifo, data, len);
         mtx_unlock(&port->outFifo_mutex);
     }
     catch (const std::exception &)
@@ -207,10 +216,6 @@ FFI_PLUGIN_EXPORT int fl_close(int flh)
             thrd_join(port->cthread, NULL);
 
         port->serialport->close();
-        if (port->cinfifo != 0)
-            fifo_destroy(port->cinfifo);
-        if (port->coutfifo != 0)
-            fifo_destroy(port->coutfifo);
 
         mtx_destroy(&port->inFifo_mutex);
         mtx_destroy(&port->outFifo_mutex);
