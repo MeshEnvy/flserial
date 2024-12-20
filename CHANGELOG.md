@@ -1,3 +1,6 @@
+## 0.3.4
+* Changelog fix
+
 ## 0.3.3
 * Replace fifo library
 
