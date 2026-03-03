@@ -75,6 +75,41 @@ FlSerial *flserial_tab[MAX_PORT_COUNT];
 int flserial_count;
 int current_port;
 
+/// Internal helper: close a single slot and null it out.
+/// Safe to call with a NULL entry — returns immediately.
+/// Sets breakThread=1 then calls thrd_join() so the SerialThread is
+/// guaranteed to have exited before this function returns.  This is the
+/// critical ordering that prevents the Dart NativeCallable from being
+/// invoked after the isolate has freed it ("Callback invoked after it has
+/// been deleted").
+static void _fl_close_slot(int slot)
+{
+    FlSerial *port = flserial_tab[slot];
+    if (port == NULL)
+        return;
+
+    port->breakThread = 1;
+
+    try
+    {
+        if (port->cthread != 0)
+            thrd_join(port->cthread, NULL);
+
+        port->serialport->close();
+
+        mtx_destroy(&port->inFifo_mutex);
+        mtx_destroy(&port->outFifo_mutex);
+    }
+    catch (const std::exception &)
+    {
+    }
+
+    delete port->serialport;
+    port->serialport = NULL;
+    delete port;
+    flserial_tab[slot] = NULL;
+}
+
 FFI_PLUGIN_EXPORT int fl_set_callback(int flh, flcallback cb)
 {
     FlSerial *port = flserial_tab[flh];
@@ -99,6 +134,12 @@ FFI_PLUGIN_EXPORT int fl_open(int flh, char *portname, int baudrate)
 
     if (porth < 0)
         porth = ++current_port;
+
+    // If a previous FlSerial (and its SerialThread) is alive in this slot,
+    // join and free it before overwriting.  On Dart hot restart the isolate
+    // dies without calling fl_close(), leaving the old thread running with a
+    // dangling NativeCallable pointer.  Joining here prevents the crash.
+    _fl_close_slot(porth);
 
     FlSerial *port = new FlSerial();
     port->breakThread = 0;
@@ -206,27 +247,7 @@ FFI_PLUGIN_EXPORT int fl_write(int flh, int len, char *data)
 
 FFI_PLUGIN_EXPORT int fl_close(int flh)
 {
-    FlSerial *port = flserial_tab[flh];
-
-    try
-    {
-        port->breakThread = 1;
-
-        if (port->cthread != 0)
-            thrd_join(port->cthread, NULL);
-
-        port->serialport->close();
-
-        mtx_destroy(&port->inFifo_mutex);
-        mtx_destroy(&port->outFifo_mutex);
-    }
-    catch (const std::exception &)
-    {
-    }
-
-    delete port->serialport;
-    port->serialport = NULL;
-    delete port;
+    _fl_close_slot(flh);
     return 0;
 }
 
@@ -344,6 +365,13 @@ FFI_PLUGIN_EXPORT int fl_ctrl(int flh, FlCtrl param, int value)
 
 FFI_PLUGIN_EXPORT int fl_free(void)
 {
+    // Join every live SerialThread before the Dart isolate tears down on hot
+    // restart.  Without this, threads holding freed NativeCallable pointers
+    // crash with "Callback invoked after it has been deleted".
+    for (int i = 0; i < MAX_PORT_COUNT; i++)
+        _fl_close_slot(i);
+
     flserial_count = 0;
+    current_port = -1;
     return 0;
 }
